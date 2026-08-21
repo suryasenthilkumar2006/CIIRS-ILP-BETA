@@ -435,20 +435,32 @@ export default function ListingForm() {
                 <PhotoUploader onUploadComplete={handlePhotoUploadComplete} />
               </div>
 
-              {/* Status Indicator */}
-              {(isCreatingListing || isAnalyzing) && (
+              {/* Status Indicator & Loading State */}
+              {isAnalyzing && (
+                <div className="flex items-center gap-3 rounded-lg border border-blue-500/40 bg-blue-500/15 p-4 text-blue-300 animate-pulse">
+                  <div className="h-5 w-5 flex-shrink-0 animate-spin rounded-full border-2 border-blue-400 border-t-transparent" />
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-semibold text-blue-200">
+                      Analyzing your photo...
+                    </p>
+                    <p className="text-xs text-blue-400/80">
+                      Gemini Vision AI is inspecting material purity, contamination levels, and assigned quality grade.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {isCreatingListing && !isAnalyzing && (
                 <div className="flex items-center gap-3 rounded-lg border border-blue-500/30 bg-blue-500/10 p-4 text-blue-400">
-                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-400 border-t-transparent" />
+                  <div className="h-5 w-5 flex-shrink-0 animate-spin rounded-full border-2 border-blue-400 border-t-transparent" />
                   <div className="text-sm font-medium">
-                    {isCreatingListing
-                      ? "Creating listing document..."
-                      : "Gemini AI inspecting waste quality & contamination..."}
+                    Creating listing document...
                   </div>
                 </div>
               )}
 
               {/* AI Grading Results */}
-              {aiGrading && (
+              {aiGrading && !isAnalyzing && (
                 <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
@@ -489,7 +501,8 @@ export default function ListingForm() {
                   type="button"
                   variant="outline"
                   onClick={() => setStep(1)}
-                  className="border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+                  disabled={isAnalyzing || isCreatingListing}
+                  className="border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                 >
                   ← Back
                 </Button>
@@ -498,9 +511,16 @@ export default function ListingForm() {
                   type="button"
                   onClick={() => setStep(3)}
                   disabled={formData.photoUrls.length === 0 || isAnalyzing || isCreatingListing}
-                  className="bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                  className="bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Next: Review & Confirm →
+                  {isAnalyzing ? (
+                    <span className="flex items-center gap-2">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                      Analyzing Photo...
+                    </span>
+                  ) : (
+                    "Next: Review & Confirm →"
+                  )}
                 </Button>
               </div>
             </div>

@@ -1,5 +1,12 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
+let sharp: any = null;
+try {
+  sharp = require("sharp");
+} catch {
+  sharp = null;
+}
+
 export interface WasteAnalysisResult {
   grade: "A" | "B" | "C";
   contaminationLevel: "none" | "low" | "medium" | "high";
@@ -9,27 +16,76 @@ export interface WasteAnalysisResult {
 }
 
 /**
- * Fetches an image from a URL and converts it to the inlineData format
- * expected by GoogleGenerativeAI.
+ * Optimizes image URLs (specifically Cloudinary CDN URLs) to automatically
+ * resize to max 1024px dimension, optimize quality, and format as JPEG,
+ * minimizing network transfer overhead before processing.
  */
-async function urlToGenerativePart(imageUrl: string) {
-  const response = await fetch(imageUrl);
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch image from URL: ${imageUrl} (Status: ${response.status} ${response.statusText})`
-    );
+function getOptimizedImageUrl(imageUrl: string): string {
+  if (imageUrl.includes("res.cloudinary.com") && imageUrl.includes("/upload/")) {
+    if (!imageUrl.includes("/upload/w_") && !imageUrl.includes("/upload/c_")) {
+      return imageUrl.replace(
+        "/upload/",
+        "/upload/w_1024,c_limit,q_auto:good,f_jpg/"
+      );
+    }
   }
+  return imageUrl;
+}
 
-  const arrayBuffer = await response.arrayBuffer();
-  const contentType = response.headers.get("content-type") || "image/jpeg";
-  const mimeType = contentType.split(";")[0].trim();
+/**
+ * Fetches an image from a URL, resizes/compresses it to a max dimension of 1024px
+ * (using sharp if available, or Cloudinary URL transformations / quality capping),
+ * and converts it to the inlineData base64 format expected by GoogleGenerativeAI.
+ */
+async function urlToGenerativePart(imageUrl: string, fetchTimeoutMs: number = 8000) {
+  const optimizedUrl = getOptimizedImageUrl(imageUrl);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), fetchTimeoutMs);
 
-  return {
-    inlineData: {
-      data: Buffer.from(arrayBuffer).toString("base64"),
-      mimeType,
-    },
-  };
+  try {
+    const response = await fetch(optimizedUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch image from URL: ${optimizedUrl} (Status: ${response.status} ${response.statusText})`
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    let buffer = Buffer.from(arrayBuffer);
+    let mimeType =
+      (response.headers.get("content-type") || "image/jpeg").split(";")[0].trim() ||
+      "image/jpeg";
+
+    // If sharp is available, resize/compress image buffer to max 1024px dimension at 80% JPEG quality
+    if (sharp) {
+      try {
+        buffer = await sharp(buffer)
+          .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toBuffer();
+        mimeType = "image/jpeg";
+      } catch (sharpError) {
+        console.warn("sharp resize fallback:", sharpError);
+      }
+    }
+
+    return {
+      inlineData: {
+        data: buffer.toString("base64"),
+        mimeType,
+      },
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === "AbortError") {
+      throw new Error(
+        `Image download timed out after ${fetchTimeoutMs / 1000}s from URL: ${imageUrl}`
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -37,24 +93,25 @@ async function urlToGenerativePart(imageUrl: string) {
  */
 function cleanJsonText(rawText: string): string {
   let cleaned = rawText.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.slice(3);
+  cleaned = cleaned.replace(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i, "$1").trim();
+
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
   }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.slice(0, -3);
-  }
+
   return cleaned.trim();
 }
 
 /**
- * Analyzes a waste photo using the Gemini Vision model and returns a quality inspection assessment.
+ * Analyzes a waste photo using the fast and cost-effective gemini-2.0-flash model
+ * and returns a quality inspection assessment with a hard 15-second timeout.
  *
  * @param imageUrl - Public URL of the waste image (e.g. from Cloudinary)
  * @param wasteType - Category/type of waste (e.g. plastic, organic, e-waste, metal, paper, textile)
  * @returns Strict typed WasteAnalysisResult object
- * @throws Error if GEMINI_API_KEY is missing, image fetch fails, or parsing fails
+ * @throws Error if GEMINI_API_KEY is missing, image fetch fails, call times out, or parsing fails
  */
 export async function analyzeWastePhoto(
   imageUrl: string,
@@ -68,9 +125,9 @@ export async function analyzeWastePhoto(
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const modelName = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
+  // Specifically use gemini-2.0-flash for fast, cost-effective vision classification
   const model = genAI.getGenerativeModel({
-    model: modelName,
+    model: "gemini-2.0-flash",
     generationConfig: {
       responseMimeType: "application/json",
       temperature: 0.2,
@@ -96,13 +153,32 @@ Grading Guidelines:
 - Grade B: Moderate quality, partially segregated, minor presence of non-target items or mild moisture/dirt (contaminationLevel: "low" or "medium").
 - Grade C: Highly contaminated, mixed, degraded, or poorly sorted material (contaminationLevel: "medium" or "high").`;
 
-  // Fetch the image and convert to inline generative part
+  // 1. Fetch image with size optimization (max 1024px) & base64 conversion
   const imagePart = await urlToGenerativePart(imageUrl);
 
+  // 2. Set up hard 15-second timeout for the Gemini API call using Promise.race()
+  const TIMEOUT_MS = 15000;
+  let timeoutTimer: NodeJS.Timeout | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => {
+      reject(
+        new Error(
+          `Gemini AI waste photo analysis timed out after ${TIMEOUT_MS / 1000} seconds.`
+        )
+      );
+    }, TIMEOUT_MS);
+  });
+
   try {
-    const result = await model.generateContent([prompt, imagePart]);
-    const response = await result.response;
-    const responseText = response.text();
+    const generatePromise = (async () => {
+      const result = await model.generateContent([prompt, imagePart]);
+      const response = await result.response;
+      return response.text();
+    })();
+
+    const responseText = await Promise.race([generatePromise, timeoutPromise]);
+    if (timeoutTimer) clearTimeout(timeoutTimer);
 
     if (!responseText) {
       throw new Error("Empty response received from Gemini API.");
@@ -147,7 +223,13 @@ Grading Guidelines:
       notes,
     };
   } catch (error: any) {
-    if (error.message?.includes("Failed to parse Gemini response") || error.message?.includes("Failed to fetch image")) {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
+    if (
+      error.message?.includes("timed out") ||
+      error.message?.includes("Failed to parse Gemini response") ||
+      error.message?.includes("Failed to fetch image")
+    ) {
       throw error;
     }
     throw new Error(`Gemini waste photo analysis failed: ${error.message || error}`);
