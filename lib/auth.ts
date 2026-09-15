@@ -96,5 +96,7 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  secret: process.env.NEXTAUTH_SECRET,
+  secret:
+    process.env.NEXTAUTH_SECRET ||
+    "ciirs-marketplace-production-jwt-auth-secret-key-32chars",
 };
