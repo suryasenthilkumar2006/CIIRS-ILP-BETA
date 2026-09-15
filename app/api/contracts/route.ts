@@ -2,13 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import Contract from "@/models/Contract";
 import WasteListing from "@/models/WasteListing";
-import "@/models/User"; // Ensure User model is registered for populate queries
+import User from "@/models/User";
+import Notification from "@/models/Notification";
 
 /**
  * POST /api/contracts
  * Creates a new contract for a waste listing in 'requested' status,
  * initializes the stage timeline with 'Listed' and 'Requested' entries,
- * and transitions the associated WasteListing's status to 'requested'.
+ * transitions the associated WasteListing's status to 'requested',
+ * and creates a notification for the supplier.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -64,6 +66,24 @@ export async function POST(req: NextRequest) {
     listing.status = "requested";
     await listing.save();
 
+    // Create a Notification document for the supplier
+    try {
+      const startup = await User.findById(startupId).select("name organizationName").lean();
+      const startupName = startup?.organizationName || startup?.name || "A circular startup";
+      const wasteType = listing.wasteType || "waste";
+
+      await Notification.create({
+        userId: supplierId,
+        type: "contract_request",
+        title: "New pickup request",
+        message: `${startupName} has submitted a pickup request for your ${wasteType} listing.`,
+        link: `/contracts/${contract._id}`,
+        read: false,
+      });
+    } catch (notifError) {
+      console.warn("Failed to create contract request notification:", notifError);
+    }
+
     return NextResponse.json(contract, { status: 201 });
   } catch (error: any) {
     console.error("POST /api/contracts error:", error);
@@ -88,6 +108,9 @@ export async function GET(req: NextRequest) {
     const startupId = searchParams.get("startupId");
     const listingId = searchParams.get("listingId");
     const status = searchParams.get("status");
+    const limit = Math.min(Math.max(1, parseInt(searchParams.get("limit") || "50", 10)), 200);
+    const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
+    const skip = (page - 1) * limit;
 
     const filter: Record<string, any> = {};
 
@@ -106,9 +129,12 @@ export async function GET(req: NextRequest) {
 
     const contracts = await Contract.find(filter)
       .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .populate("listingId", "wasteType subType quantityKg unit priceEstimate status photoUrls location")
       .populate("supplierId", "name organizationName organizationType email phone address")
-      .populate("startupId", "name organizationName organizationType email phone address");
+      .populate("startupId", "name organizationName organizationType email phone address")
+      .lean();
 
     return NextResponse.json(contracts, { status: 200 });
   } catch (error: any) {

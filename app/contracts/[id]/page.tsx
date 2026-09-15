@@ -1,11 +1,21 @@
 import React from "react";
 import Link from "next/link";
 import mongoose from "mongoose";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { connectDB } from "@/lib/db";
 import Contract from "@/models/Contract";
-import "@/models/WasteListing";
-import "@/models/User";
+import User from "@/models/User";
+import WasteListing from "@/models/WasteListing";
+import { generateOTP, hashOTP } from "@/lib/otp";
+import { sendOTPEmail } from "@/lib/mailer";
+import { revalidatePath } from "next/cache";
 import ContractTimeline from "@/components/contracts/ContractTimeline";
+import OtpInput from "@/components/contracts/OtpInput";
+import SupplierOtpCard from "@/components/contracts/SupplierOtpCard";
+import LocationBroadcaster from "@/components/contracts/LocationBroadcaster";
+import LiveTrackingMap from "@/components/contracts/LiveTrackingMap";
+import RouteMap from "@/components/contracts/RouteMap";
 import {
   FileText,
   Building2,
@@ -23,6 +33,7 @@ import {
   Layers,
   ChevronRight,
   TrendingUp,
+  CheckCircle2,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -44,42 +55,21 @@ export default async function ContractDetailPage({ params }: ContractPageProps) 
 
   // Validate ObjectId format
   if (!id || !mongoose.Types.ObjectId.isValid(id)) {
-    return <ContractNotFoundState id={id} message="Invalid contract ID format provided." />;
+    return <ContractNotFoundState id={id} message="Invalid contract reference ID format." />;
   }
 
+  await connectDB();
+
+  // Populate listing, supplier, and startup relations
   let contractDoc: any = null;
-
   try {
-    await connectDB();
-
     contractDoc = await Contract.findById(id)
       .populate("listingId")
-      .populate("supplierId", "name organizationName organizationType email phone address location greenCreditBalance")
-      .populate("startupId", "name organizationName organizationType email phone address location greenCreditBalance")
+      .populate("supplierId", "name organizationName organizationType email phone address location")
+      .populate("startupId", "name organizationName organizationType email phone address location")
       .lean();
-  } catch (err: any) {
-    console.error("Failed to load contract:", err);
-    return (
-      <main className="min-h-screen bg-zinc-950 px-4 py-12 text-zinc-100 flex items-center justify-center">
-        <Card className="max-w-md w-full border-red-500/30 bg-red-500/10 text-red-300">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-red-400">
-              <AlertCircle className="h-5 w-5" />
-              Database Connection Error
-            </CardTitle>
-            <CardDescription className="text-zinc-400">
-              Unable to retrieve contract records from the database.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm text-zinc-300">{err?.message || "An unexpected error occurred."}</p>
-            <Button asChild variant="outline" className="border-zinc-700 bg-zinc-900 text-zinc-200">
-              <Link href="/contracts">← Return to Contracts</Link>
-            </Button>
-          </CardContent>
-        </Card>
-      </main>
-    );
+  } catch (err) {
+    console.error("Failed to query Contract:", err);
   }
 
   // Handle Contract Not Found
@@ -87,12 +77,105 @@ export default async function ContractDetailPage({ params }: ContractPageProps) 
     return <ContractNotFoundState id={id} message="No contract found matching this reference ID." />;
   }
 
+  // Retrieve user session
+  const session = await getServerSession(authOptions);
+  const currentUserId = (session?.user as any)?.id;
+
   // Safely serialize for Client Component hydration
   const contract = JSON.parse(JSON.stringify(contractDoc));
   const listing = contract.listingId || {};
   const supplier = contract.supplierId || {};
   const startup = contract.startupId || {};
   const aiGrading = listing.aiGrading || {};
+
+  const supplierIdStr = supplier._id?.toString() || contract.supplierId?.toString();
+  const startupIdStr = startup._id?.toString() || contract.startupId?.toString();
+  const userRole = (session?.user as any)?.role;
+  const isSupplier = currentUserId
+    ? currentUserId === supplierIdStr || (userRole === "supplier" && currentUserId !== startupIdStr)
+    : false;
+  const isStartup = currentUserId
+    ? currentUserId === startupIdStr || (userRole === "startup" && currentUserId !== supplierIdStr)
+    : false;
+
+  async function handleConfirm() {
+    "use server";
+    const userSession = await getServerSession(authOptions);
+    const userId = (userSession?.user as any)?.id;
+    if (!userId) return;
+
+    await connectDB();
+    const targetContract = await Contract.findById(id);
+    if (!targetContract) return;
+
+    if (targetContract.status === "requested") {
+      targetContract.status = "confirmed";
+      if (!targetContract.timeline) targetContract.timeline = [];
+      targetContract.timeline.push({
+        stage: "Confirmed",
+        timestamp: new Date(),
+        note: `Contract accepted and confirmed by material supplier (${targetContract.supplierId}).`,
+      });
+      await targetContract.save();
+    }
+
+    revalidatePath(`/contracts/${id}`);
+    revalidatePath("/contracts");
+    revalidatePath("/dashboard");
+  }
+
+  async function handleSchedule(formData: FormData) {
+    "use server";
+    const userSession = await getServerSession(authOptions);
+    const userId = (userSession?.user as any)?.id;
+    const scheduledPickupAt = formData.get("scheduledPickupAt") as string;
+    if (!userId || !scheduledPickupAt) return;
+
+    await connectDB();
+    const targetContract = await Contract.findById(id);
+    if (!targetContract) return;
+
+    if (targetContract.status === "confirmed" || targetContract.status === "requested") {
+      const pickupDate = new Date(scheduledPickupAt);
+      if (!isNaN(pickupDate.getTime())) {
+        targetContract.scheduledPickupAt = pickupDate;
+        targetContract.status = "scheduled";
+
+        const otp = generateOTP();
+        const hashedOtp = await hashOTP(otp);
+        targetContract.otpCode = hashedOtp;
+
+        if (!targetContract.timeline) targetContract.timeline = [];
+        targetContract.timeline.push({
+          stage: "Scheduled",
+          timestamp: new Date(),
+          note: `Pickup window scheduled for ${pickupDate.toLocaleString("en-US", {
+            dateStyle: "medium",
+            timeStyle: "short",
+          })}. 6-digit handover OTP generated and emailed to supplier.`,
+        });
+        await targetContract.save();
+
+        try {
+          const supplierUser = await User.findById(targetContract.supplierId);
+          if (supplierUser?.email) {
+            let wasteType = "Recyclable Waste";
+            if (targetContract.listingId) {
+              const listingDoc = await WasteListing.findById(targetContract.listingId);
+              if (listingDoc?.wasteType) wasteType = listingDoc.wasteType;
+            }
+            await sendOTPEmail(supplierUser.email, otp, wasteType);
+          }
+        } catch (mErr) {
+          console.error("Failed to send OTP email:", mErr);
+        }
+      }
+    }
+
+    revalidatePath(`/contracts/${id}`);
+    revalidatePath("/contracts");
+    revalidatePath("/dashboard");
+  }
 
   const gradeColor =
     aiGrading.grade === "A"
@@ -104,29 +187,68 @@ export default async function ContractDetailPage({ params }: ContractPageProps) 
       : "bg-zinc-800 text-zinc-400 border-zinc-700";
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-4 py-8 sm:px-6 lg:px-8 text-zinc-100">
-      <div className="mx-auto max-w-6xl space-y-8">
-        {/* Navigation Breadcrumb & Header */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-6">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
-              <Link href="/contracts" className="hover:text-zinc-200 transition-colors flex items-center gap-1">
-                <ArrowLeft className="h-3 w-3" />
-                Contracts
-              </Link>
-              <ChevronRight className="h-3 w-3 text-zinc-600" />
-              <span className="text-zinc-300 font-mono">#{contract._id?.slice(-6) || "ID"}</span>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
+      <main className="flex-1 px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-6xl space-y-8">
+          {/* Role Mode Banner */}
+          <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 py-2.5 backdrop-blur-md">
+            <div className="flex items-center gap-2.5">
+              {isSupplier ? (
+                <>
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <Factory className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                      Supplier Custody Desk
+                    </span>
+                    <p className="text-[11px] text-zinc-400">
+                      Material handoff, OTP custody release, and Green Credit earning.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                    <Building2 className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-blue-400">
+                      Startup Procurement Desk
+                    </span>
+                    <p className="text-[11px] text-zinc-400">
+                      Inbound circular resource verification and valorization batching.
+                    </p>
+                  </div>
+                </>
+              )}
             </div>
-            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white flex items-center gap-3">
-              <span>Contract Details</span>
-              <span className="text-sm font-normal font-mono text-zinc-500">
-                ({contract._id})
-              </span>
-            </h1>
-            <p className="text-xs sm:text-sm text-zinc-400">
-              Initiated on {contract.createdAt ? new Date(contract.createdAt).toLocaleDateString("en-US", { dateStyle: "long" }) : "N/A"}
-            </p>
+            <span className="rounded-full bg-zinc-800 px-2.5 py-0.5 text-[10px] font-mono font-medium text-zinc-300">
+              {isSupplier ? "SUPPLIER MODE" : "STARTUP MODE"}
+            </span>
           </div>
+
+          {/* Navigation Breadcrumb & Header */}
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-6">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-xs text-zinc-400">
+                <Link href="/contracts" className="hover:text-zinc-200 transition-colors flex items-center gap-1">
+                  <ArrowLeft className="h-3 w-3" />
+                  Contracts
+                </Link>
+                <ChevronRight className="h-3 w-3 text-zinc-600" />
+                <span className="text-zinc-300 font-mono">#{contract._id?.slice(-6) || "ID"}</span>
+              </div>
+              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white flex items-center gap-3">
+                <span>Contract Details</span>
+                <span className="text-sm font-normal font-mono text-zinc-500">
+                  ({contract._id})
+                </span>
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400">
+                Initiated on {contract.createdAt ? new Date(contract.createdAt).toLocaleDateString("en-US", { dateStyle: "long" }) : "N/A"}
+              </p>
+            </div>
 
           {/* Quick Metrics Badge */}
           <div className="flex flex-wrap items-center gap-3">
@@ -150,10 +272,165 @@ export default async function ContractDetailPage({ params }: ContractPageProps) 
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold uppercase tracking-wider text-zinc-400">
-              Contract Lifecycle & Stage Progress
+              Contract Lifecycle &amp; Stage Progress
             </h2>
           </div>
           <ContractTimeline contract={contract} />
+
+          {/* STAGE 1: REQUESTED */}
+          {contract.status === "requested" && (
+            <div className="pt-2">
+              {isSupplier ? (
+                <Card className="border-emerald-500/40 bg-emerald-950/20 p-4 shadow-lg">
+                  <form action={handleConfirm} className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
+                        <h3 className="text-sm font-bold text-emerald-300">Contract Request Pending Your Approval</h3>
+                      </div>
+                      <p className="text-xs text-emerald-200/70">
+                        Startup <span className="font-semibold text-white">{startup.organizationName || startup.name || "Buyer"}</span> has initiated procurement for this batch. Accept the request to proceed to pickup scheduling.
+                      </p>
+                    </div>
+                    <Button
+                      type="submit"
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs sm:text-sm shadow-md shadow-emerald-900/30 whitespace-nowrap shrink-0"
+                    >
+                      Accept &amp; Confirm Contract
+                    </Button>
+                  </form>
+                </Card>
+              ) : (
+                <Card className="border-blue-500/30 bg-blue-950/20 p-4 shadow-md">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="h-2 w-2 rounded-full bg-blue-400 animate-pulse" />
+                        <h3 className="text-sm font-bold text-blue-300">Pending Supplier Confirmation</h3>
+                      </div>
+                      <p className="text-xs text-blue-200/70">
+                        Your contract request has been delivered to <span className="font-semibold text-white">{supplier.organizationName || supplier.name || "the supplier"}</span>. Once confirmed, you can schedule the pickup window.
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-blue-500/20 px-3 py-1 text-xs font-mono font-medium text-blue-300 border border-blue-500/30 shrink-0">
+                      Awaiting Supplier Action
+                    </span>
+                  </div>
+                </Card>
+              )}
+            </div>
+          )}
+
+          {/* STAGE 2: CONFIRMED */}
+          {contract.status === "confirmed" && (
+            <div className="pt-2">
+              <Card className="border-blue-500/30 bg-zinc-900/80 p-4 shadow-lg">
+                <form action={handleSchedule} className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Clock className="h-4 w-4 text-blue-400" />
+                      <h3 className="text-sm font-bold text-white">Schedule Material Pickup Window</h3>
+                    </div>
+                    <p className="text-xs text-zinc-400">
+                      Select the scheduled collection date and time. An OTP handover code will be generated and dispatched.
+                    </p>
+                  </div>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+                    <input
+                      type="datetime-local"
+                      name="scheduledPickupAt"
+                      required
+                      className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs sm:text-sm text-zinc-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <Button
+                      type="submit"
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs sm:text-sm shadow-md shadow-blue-900/30 whitespace-nowrap shrink-0"
+                    >
+                      Schedule Pickup
+                    </Button>
+                  </div>
+                </form>
+              </Card>
+            </div>
+          )}
+
+          {/* STAGE 3: SCHEDULED (Live Tracking Telemetry & Role Separated OTP Flow) */}
+          {contract.status === "scheduled" && (
+            <div className="pt-2 space-y-4">
+              {/* Live Tracking / Broadcaster */}
+              {isSupplier ? (
+                <LocationBroadcaster contractId={contract._id} />
+              ) : (
+                <LiveTrackingMap
+                  contractId={contract._id}
+                  destinationLocation={
+                    startup?.location?.coordinates
+                      ? {
+                          lat: startup.location.coordinates[1],
+                          lng: startup.location.coordinates[0],
+                          label: startup.organizationName || startup.name || "Startup Facility",
+                        }
+                      : listing?.location?.coordinates
+                      ? {
+                          lat: listing.location.coordinates[1],
+                          lng: listing.location.coordinates[0],
+                          label: "Pickup Location",
+                        }
+                      : undefined
+                  }
+                />
+              )}
+
+              {/* OTP Custody Release & Verification */}
+              {isSupplier ? (
+                /* Supplier View: Displays instructions & resend helper */
+                <SupplierOtpCard
+                  contractId={contract._id}
+                  supplierEmail={supplier?.email}
+                  scheduledPickupAt={contract.scheduledPickupAt}
+                  startupName={startup?.organizationName || startup?.name}
+                />
+              ) : (
+                /* Startup / Collector View: Enters OTP code received on-site */
+                <OtpInput
+                  contractId={contract._id}
+                  supplierEmail={supplier?.email}
+                  onVerified={async () => {
+                    "use server";
+                    revalidatePath(`/contracts/${id}`);
+                    revalidatePath("/contracts");
+                    revalidatePath("/dashboard");
+                  }}
+                />
+              )}
+            </div>
+          )}
+
+          {/* STAGE 4: COMPLETED / VERIFIED */}
+          {(contract.status === "completed" || contract.status === "otp_verified") && (
+            <div className="pt-2">
+              <Card className="border-emerald-500/40 bg-emerald-950/25 p-5 shadow-xl">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                        <CheckCircle2 className="h-4 w-4" />
+                      </div>
+                      <h3 className="text-base font-bold text-white">Custody Handover Verified &amp; Transaction Completed</h3>
+                    </div>
+                    <p className="text-xs text-emerald-200/80">
+                      Physical custody verified on-site via cryptographic OTP. Environmental Green Credits have been awarded and credited to the wallet.
+                    </p>
+                  </div>
+                  <Button asChild className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs sm:text-sm shadow-lg shadow-emerald-900/40 shrink-0">
+                    <Link href={`/certificates/${contract._id}`}>
+                      <span>View Official Impact Certificate →</span>
+                    </Link>
+                  </Button>
+                </div>
+              </Card>
+            </div>
+          )}
         </section>
 
         {/* 2. Main Content Grid: Waste Listing Summary & Participating Parties */}
@@ -264,6 +541,25 @@ export default async function ContractDetailPage({ params }: ContractPageProps) 
                     </p>
                   )}
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Driving Transit & Logistics Route Map */}
+            <Card className="border-zinc-800 bg-zinc-950/80 text-zinc-100 shadow-lg">
+              <CardHeader className="border-b border-zinc-800/80 pb-3">
+                <CardTitle className="text-base text-zinc-200 flex items-center gap-2">
+                  <MapPin className="h-4 w-4 text-emerald-400" />
+                  <span>Transit & Logistics Route</span>
+                </CardTitle>
+                <CardDescription className="text-xs text-zinc-400">
+                  Driving directions between supplier pickup point and startup facility
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pt-4">
+                <RouteMap
+                  supplierLocation={listing.location || supplier.location}
+                  startupLocation={startup.location}
+                />
               </CardContent>
             </Card>
 
@@ -399,6 +695,7 @@ export default async function ContractDetailPage({ params }: ContractPageProps) 
         </div>
       </div>
     </main>
+    </div>
   );
 }
 

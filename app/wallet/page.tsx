@@ -18,6 +18,8 @@ import {
   Calendar,
   ArrowLeft,
   Layers,
+  Building2,
+  Factory,
 } from "lucide-react";
 import {
   Card,
@@ -78,23 +80,64 @@ export default async function WalletPage() {
     0
   );
 
+  const isStartup = (user as any)?.role === "startup";
+
   return (
-    <main className="min-h-screen bg-zinc-950 px-4 py-8 sm:px-6 lg:px-8 text-zinc-100">
-      <div className="mx-auto max-w-6xl space-y-8">
-        {/* Navigation & Header */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-6">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
-              <Link
-                href="/dashboard"
-                className="hover:text-zinc-200 transition-colors flex items-center gap-1"
-              >
-                <ArrowLeft className="h-3 w-3" />
-                Dashboard
-              </Link>
-              <span className="text-zinc-600">/</span>
-              <span className="text-emerald-400 font-medium">Eco Wallet</span>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
+      <main className="flex-1 px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-6xl space-y-8">
+          {/* Role Mode Banner */}
+          <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 py-2.5 backdrop-blur-md">
+            <div className="flex items-center gap-2.5">
+              {isStartup ? (
+                <>
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                    <Building2 className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-blue-400">
+                      Startup Environmental Portfolio
+                    </span>
+                    <p className="text-[11px] text-zinc-400">
+                      Inbound verified circular material impact and offset credentials.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <Factory className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                      Supplier Green Credits Wallet
+                    </span>
+                    <p className="text-[11px] text-zinc-400">
+                      Earned credits from verified physical custody pickups and circular diversion.
+                    </p>
+                  </div>
+                </>
+              )}
             </div>
+            <span className="rounded-full bg-zinc-800 px-2.5 py-0.5 text-[10px] font-mono font-medium text-zinc-300">
+              {isStartup ? "STARTUP MODE" : "SUPPLIER MODE"}
+            </span>
+          </div>
+
+          {/* Navigation & Header */}
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-6">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-xs text-zinc-400">
+                <Link
+                  href="/dashboard"
+                  className="hover:text-zinc-200 transition-colors flex items-center gap-1"
+                >
+                  <ArrowLeft className="h-3 w-3" />
+                  Dashboard
+                </Link>
+                <span className="text-zinc-600">/</span>
+                <span className="text-emerald-400 font-medium">Eco Wallet</span>
+              </div>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white flex items-center gap-3">
               <span>Green Credits Wallet</span>
               <span className="rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-400 border border-emerald-500/20">
@@ -302,5 +345,6 @@ export default async function WalletPage() {
         </Card>
       </div>
     </main>
+    </div>
   );
 }

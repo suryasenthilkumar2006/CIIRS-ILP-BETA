@@ -46,7 +46,8 @@ export const authOptions: NextAuthOptions = {
 
         await connectDB();
 
-        const user = await User.findOne({ email: credentials.email });
+        const normalizedEmail = credentials.email.trim().toLowerCase();
+        const user = await User.findOne({ email: normalizedEmail });
         if (!user || !user.passwordHash) {
           return null;
         }
@@ -66,6 +67,7 @@ export const authOptions: NextAuthOptions = {
           name: user.name,
           role: user.role,
           organizationName: user.organizationName,
+          greenCreditBalance: user.greenCreditBalance || 0,
         };
       },
     }),
@@ -80,6 +82,7 @@ export const authOptions: NextAuthOptions = {
         token.id = user.id;
         token.role = user.role;
         token.organizationName = user.organizationName;
+        token.greenCreditBalance = (user as any).greenCreditBalance;
       }
       return token;
     },
@@ -88,6 +91,7 @@ export const authOptions: NextAuthOptions = {
         session.user.id = token.id as string;
         session.user.role = token.role as string;
         session.user.organizationName = token.organizationName as string;
+        (session.user as any).greenCreditBalance = token.greenCreditBalance as number;
       }
       return session;
     },

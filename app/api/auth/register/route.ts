@@ -18,6 +18,8 @@ export async function POST(req: Request) {
             location,
             longitude,
             latitude,
+            wasteTypesOffered,
+            wasteTypesNeeded,
         } = body;
 
         // Validate required fields
@@ -75,6 +77,8 @@ export async function POST(req: Request) {
                 type: "Point",
                 coordinates,
             },
+            wasteTypesOffered: Array.isArray(wasteTypesOffered) ? wasteTypesOffered : [],
+            wasteTypesNeeded: Array.isArray(wasteTypesNeeded) ? wasteTypesNeeded : [],
             greenCreditBalance: 0,
         });
 

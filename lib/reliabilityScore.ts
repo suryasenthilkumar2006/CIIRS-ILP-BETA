@@ -1,4 +1,18 @@
-import Anthropic from "@anthropic-ai/sdk";
+/**
+ * ============================================================================
+ * NOTE: COST-SAVING TEMPORARY ROUTING VIA GOOGLE GEMINI API
+ * ============================================================================
+ * This module is temporarily routed through Google's Gemini API (gemini-2.0-flash)
+ * using @google/generative-ai instead of Anthropic's Claude SDK to reduce API
+ * costs during development.
+ *
+ * The 12-factor actuarial scoring methodology, parameter signatures, and
+ * strict JSON return shapes remain identical. This module can be swapped back
+ * to Anthropic's SDK at any time without touching any calling code.
+ * ============================================================================
+ */
+
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod";
 
 export interface ReliabilityRawFactors {
@@ -59,28 +73,17 @@ const ReliabilityScoreSchema = z.object({
 });
 
 /**
- * Initializes and returns an Anthropic client instance using ANTHROPIC_API_KEY.
- * @throws Error if ANTHROPIC_API_KEY is not defined in environment variables.
+ * Initializes and returns a GoogleGenerativeAI client instance using GEMINI_API_KEY.
+ * @throws Error if GEMINI_API_KEY is not defined in environment variables.
  */
-function getAnthropicClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+function getGeminiClient(): GoogleGenerativeAI {
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "ANTHROPIC_API_KEY is not defined in environment variables. Please add it to your .env file."
+      "GEMINI_API_KEY is not defined in environment variables. Please add it to your .env file."
     );
   }
-  return new Anthropic({ apiKey });
-}
-
-/**
- * Extracts plain text from the Anthropic message response content blocks.
- */
-function extractTextContent(response: Anthropic.Messages.Message): string {
-  return response.content
-    .filter((block): block is Anthropic.Messages.TextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  return new GoogleGenerativeAI(apiKey);
 }
 
 /**
@@ -101,7 +104,7 @@ function cleanJsonText(rawText: string): string {
 
 /**
  * Calculates a comprehensive B2B supplier/startup Reliability Score (0 - 850 scale)
- * using Claude by encoding a 12-factor weighted actuarial methodology.
+ * using Gemini by encoding the proprietary 12-factor weighted actuarial methodology.
  *
  * @param userId - The unique identifier of the user/organization
  * @param rawFactorData - Key performance indicators and behavioral metrics for the user
@@ -112,8 +115,15 @@ export async function calculateReliabilityScore(
   userId: string,
   rawFactorData: ReliabilityRawFactors | Record<string, any>
 ): Promise<ReliabilityScoreResult> {
-  const anthropic = getAnthropicClient();
-  const modelName = process.env.ANTHROPIC_MODEL?.trim() || "claude-3-5-sonnet-20240620";
+  const genAI = getGeminiClient();
+  const modelName = process.env.GEMINI_MODEL?.trim() || "gemini-2.0-flash";
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    generationConfig: {
+      responseMimeType: "application/json",
+      temperature: 0.1,
+    },
+  });
 
   const systemPrompt = `You are the CIIRS Actuarial Reliability Engine. CIIRS is a B2B circular economy marketplace connecting waste generators (suppliers) with valorization startups.
 
@@ -138,7 +148,7 @@ Your task is to compute the official CIIRS Reliability Score (0 to 850 scale, st
 - The "breakdown" object MUST contain numeric contribution points for all 12 factor keys.
 - The sum of all breakdown factor points should closely match the final "score" (within rounding).
 - If any factor is missing in the input, apply a sensible baseline score for a new/standard user (e.g. 50-70% of max points for transaction-dependent metrics).
-- Output STRICT JSON ONLY. Do NOT use markdown code fences. Do NOT include any conversation or introductory text.
+- Output STRICT JSON ONLY matching the specified schema. Do NOT include markdown code fences or conversational text.
 
 ### OUTPUT JSON SCHEMA:
 {
@@ -166,23 +176,33 @@ ${JSON.stringify(rawFactorData, null, 2)}
 
 Return strict JSON only matching the specified schema.`;
 
-  try {
-    const response = await anthropic.messages.create({
-      model: modelName,
-      max_tokens: 1500,
-      temperature: 0.1,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: userPrompt,
-        },
-      ],
-    });
+  const TIMEOUT_MS = 20000;
+  let timeoutTimer: NodeJS.Timeout | undefined;
 
-    const rawResponseText = extractTextContent(response);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => {
+      reject(
+        new Error(
+          `Reliability score calculation timed out after ${TIMEOUT_MS / 1000} seconds.`
+        )
+      );
+    }, TIMEOUT_MS);
+  });
+
+  try {
+    const apiCallPromise = (async (): Promise<string> => {
+      const result = await model.generateContent([
+        `${systemPrompt}\n\n${userPrompt}`,
+      ]);
+      const response = await result.response;
+      return response.text();
+    })();
+
+    const rawResponseText = await Promise.race([apiCallPromise, timeoutPromise]);
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
     if (!rawResponseText) {
-      throw new Error("Empty response received from Claude API during reliability score calculation.");
+      throw new Error("Empty response received from Gemini during reliability score calculation.");
     }
 
     const cleanedJson = cleanJsonText(rawResponseText);
@@ -192,7 +212,7 @@ Return strict JSON only matching the specified schema.`;
       parsedJson = JSON.parse(cleanedJson);
     } catch (parseError: any) {
       throw new Error(
-        `Failed to parse Claude reliability score response as JSON: ${parseError.message}. Response was: "${rawResponseText}"`
+        `Failed to parse Gemini reliability score response as JSON: ${parseError.message}. Response was: "${rawResponseText}"`
       );
     }
 
@@ -215,10 +235,13 @@ Return strict JSON only matching the specified schema.`;
       reasoning: validatedData.reasoning.trim(),
     };
   } catch (error: any) {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
     if (
-      error.message?.includes("ANTHROPIC_API_KEY is not defined") ||
+      error.message?.includes("GEMINI_API_KEY is not defined") ||
       error.message?.includes("Invalid reliability score output") ||
-      error.message?.includes("Failed to parse Claude reliability score")
+      error.message?.includes("Failed to parse Gemini reliability score") ||
+      error.message?.includes("timed out")
     ) {
       throw error;
     }

@@ -1,4 +1,18 @@
-import Anthropic from "@anthropic-ai/sdk";
+/**
+ * ============================================================================
+ * NOTE: COST-SAVING TEMPORARY ROUTING VIA GOOGLE GEMINI API
+ * ============================================================================
+ * This module is temporarily routed through Google's Gemini API (gemini-2.0-flash)
+ * using @google/generative-ai instead of Anthropic's Claude SDK to reduce API
+ * costs during development.
+ *
+ * All exported function names, parameter signatures, and return shapes are
+ * strictly identical to the original Claude implementation. This module can
+ * be swapped back to Anthropic's SDK at any time without touching any calling code.
+ * ============================================================================
+ */
+
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export interface WasteListingAiGrading {
   grade?: string;
@@ -67,28 +81,17 @@ export interface WasteBotChatContext {
 }
 
 /**
- * Initializes and returns an Anthropic client instance using the ANTHROPIC_API_KEY.
- * @throws Error if ANTHROPIC_API_KEY is not defined in environment variables.
+ * Initializes and returns a GoogleGenerativeAI client instance using GEMINI_API_KEY.
+ * @throws Error if GEMINI_API_KEY is not defined in environment variables.
  */
-function getAnthropicClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+function getGeminiClient(): GoogleGenerativeAI {
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "ANTHROPIC_API_KEY is not defined in environment variables. Please add it to your .env file."
+      "GEMINI_API_KEY is not defined in environment variables. Please add it to your .env file."
     );
   }
-  return new Anthropic({ apiKey });
-}
-
-/**
- * Extracts plain text from the Anthropic message response content blocks.
- */
-function extractTextContent(response: Anthropic.Messages.Message): string {
-  return response.content
-    .filter((block): block is Anthropic.Messages.TextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  return new GoogleGenerativeAI(apiKey);
 }
 
 /**
@@ -100,7 +103,7 @@ function cleanJsonText(rawText: string): string {
   // Strip standard markdown code blocks (```json ... ``` or ``` ... ```)
   cleaned = cleaned.replace(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i, "$1").trim();
 
-  // If there are still surrounding backticks or extraneous text, locate the outermost JSON object boundaries
+  // If there are still surrounding backticks or extraneous text, locate outermost JSON object boundaries
   const firstBrace = cleaned.indexOf("{");
   const lastBrace = cleaned.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
@@ -136,7 +139,7 @@ function formatLocation(location?: WasteListingLocation | string): string {
 }
 
 /**
- * Evaluates and ranks candidate valorization/recycling startups for a given waste listing using Claude.
+ * Evaluates and ranks candidate valorization/recycling startups for a given waste listing using Gemini.
  * Performs deep contextual reasoning about material compatibility, contamination tolerances,
  * processing scale, and geographic logistics.
  *
@@ -153,8 +156,15 @@ export async function matchListingToStartups(
     return { matches: [] };
   }
 
-  const anthropic = getAnthropicClient();
-  const modelName = process.env.ANTHROPIC_MODEL?.trim() || "claude-3-5-sonnet-20240620";
+  const genAI = getGeminiClient();
+  const modelName = process.env.GEMINI_MODEL?.trim() || "gemini-3.7-flash";
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    generationConfig: {
+      responseMimeType: "application/json",
+      temperature: 0.2,
+    },
+  });
 
   // Normalize candidate startups with clean identifiers for reliable matching
   const formattedCandidates = candidateStartups.map((startup, index) => {
@@ -200,12 +210,13 @@ Evaluate the fit based on:
 4. Logistical Feasibility: Evaluate geographic compatibility between generator location and startup address/coordinates.
 
 OUTPUT FORMAT INSTRUCTIONS:
-- You must return STRICT JSON ONLY.
-- Do NOT wrap output in markdown code fences (\`\`\`json).
-- Do NOT include any conversational preamble, explanations, or trailing commentary.
+- You must return STRICT JSON ONLY matching the schema below.
+- Do NOT wrap output in markdown code fences.
+- Do NOT include conversational preamble, explanations, or trailing commentary.
 - Every candidate in the provided list MUST be evaluated and included in the "matches" array.
 - The "matches" array MUST be sorted in descending order of "score" (best-fit candidate first).
-- Match schema:
+
+JSON Schema:
 {
   "matches": [
     {
@@ -226,23 +237,33 @@ ${JSON.stringify(formattedCandidates, null, 2)}
 
 Evaluate all candidates and return the JSON object with the ranked "matches" array.`;
 
-  try {
-    const response = await anthropic.messages.create({
-      model: modelName,
-      max_tokens: 2048,
-      temperature: 0.2,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: userPrompt,
-        },
-      ],
-    });
+  const TIMEOUT_MS = 20000;
+  let timeoutTimer: NodeJS.Timeout | undefined;
 
-    const rawResponseText = extractTextContent(response);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => {
+      reject(
+        new Error(
+          `AI startup matching timed out after ${TIMEOUT_MS / 1000} seconds.`
+        )
+      );
+    }, TIMEOUT_MS);
+  });
+
+  try {
+    const apiCallPromise = (async (): Promise<string> => {
+      const result = await model.generateContent([
+        `${systemPrompt}\n\n${userPrompt}`,
+      ]);
+      const response = await result.response;
+      return response.text();
+    })();
+
+    const rawResponseText = await Promise.race([apiCallPromise, timeoutPromise]);
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
     if (!rawResponseText) {
-      throw new Error("Empty response received from Claude API.");
+      throw new Error("Empty response received from AI matching engine.");
     }
 
     const cleanedJson = cleanJsonText(rawResponseText);
@@ -252,13 +273,13 @@ Evaluate all candidates and return the JSON object with the ranked "matches" arr
       parsed = JSON.parse(cleanedJson);
     } catch (parseError: any) {
       throw new Error(
-        `Failed to parse Claude matching response as JSON: ${parseError.message}. Response was: "${rawResponseText}"`
+        `Failed to parse matching response as JSON: ${parseError.message}. Response was: "${rawResponseText}"`
       );
     }
 
     if (!parsed || !Array.isArray(parsed.matches)) {
       throw new Error(
-        `Invalid Claude response format: missing or invalid "matches" array. Response was: "${rawResponseText}"`
+        `Invalid matching response format: missing or invalid "matches" array. Response was: "${rawResponseText}"`
       );
     }
 
@@ -290,14 +311,17 @@ Evaluate all candidates and return the JSON object with the ranked "matches" arr
 
     return { matches };
   } catch (error: any) {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
     if (
-      error.message?.includes("Failed to parse Claude matching response") ||
-      error.message?.includes("Invalid Claude response format") ||
-      error.message?.includes("ANTHROPIC_API_KEY is not defined")
+      error.message?.includes("Failed to parse matching response") ||
+      error.message?.includes("Invalid matching response format") ||
+      error.message?.includes("GEMINI_API_KEY is not defined") ||
+      error.message?.includes("timed out")
     ) {
       throw error;
     }
-    throw new Error(`Claude startup matching failed: ${error.message || error}`);
+    throw new Error(`AI startup matching failed: ${error.message || error}`);
   }
 }
 
@@ -308,15 +332,22 @@ Evaluate all candidates and return the JSON object with the ranked "matches" arr
  *
  * @param userMessage - The message or question sent by the user
  * @param context - Optional context such as user profile, active listing details, or platform state
- * @returns Plain text response generated by Claude
+ * @returns Plain text response generated by Gemini
  * @throws Error if API key is missing or API call fails
  */
 export async function generateChatResponse(
   userMessage: string,
   context?: WasteBotChatContext | Record<string, any>
 ): Promise<string> {
-  const anthropic = getAnthropicClient();
-  const modelName = process.env.ANTHROPIC_MODEL?.trim() || "claude-3-5-sonnet-20240620";
+  const genAI = getGeminiClient();
+  const modelName = process.env.GEMINI_MODEL?.trim() || "gemini-2.0-flash";
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 1024,
+    },
+  });
 
   const systemPrompt = `You are WasteBot, the dedicated AI assistant for CIIRS (Circular Industrial & Institutional Resource Recovery System).
 CIIRS is an intelligent B2B marketplace and circular economy platform connecting waste generators (temples, apartments, restaurants, factories, institutions) with recycling and valorization startups.
@@ -337,28 +368,43 @@ ${JSON.stringify(context, null, 2)}
 ${userMessage}`;
   }
 
-  try {
-    const response = await anthropic.messages.create({
-      model: modelName,
-      max_tokens: 1024,
-      temperature: 0.7,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: promptContent,
-        },
-      ],
-    });
+  const TIMEOUT_MS = 20000;
+  let timeoutTimer: NodeJS.Timeout | undefined;
 
-    const responseText = extractTextContent(response);
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => {
+      reject(
+        new Error(
+          `WasteBot chat generation timed out after ${TIMEOUT_MS / 1000} seconds.`
+        )
+      );
+    }, TIMEOUT_MS);
+  });
+
+  try {
+    const apiCallPromise = (async (): Promise<string> => {
+      const result = await model.generateContent([
+        `${systemPrompt}\n\n${promptContent}`,
+      ]);
+      const response = await result.response;
+      return response.text();
+    })();
+
+    const responseText = await Promise.race([apiCallPromise, timeoutPromise]);
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
     if (!responseText) {
       throw new Error("Empty response received from WasteBot chat generation.");
     }
 
     return responseText;
   } catch (error: any) {
-    if (error.message?.includes("ANTHROPIC_API_KEY is not defined")) {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+
+    if (
+      error.message?.includes("GEMINI_API_KEY is not defined") ||
+      error.message?.includes("timed out")
+    ) {
       throw error;
     }
     throw new Error(`WasteBot chat response generation failed: ${error.message || error}`);

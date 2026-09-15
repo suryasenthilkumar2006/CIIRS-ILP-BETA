@@ -16,6 +16,11 @@ export interface IContract extends Document {
   otpVerifiedAt?: Date;
   greenCreditsAwarded?: number;
   co2SavedKg?: number;
+  liveLocation?: {
+    lat: number;
+    lng: number;
+    updatedAt: Date;
+  };
   status:
     | "listed"
     | "matched"
@@ -68,6 +73,11 @@ const ContractSchema = new Schema<IContract>(
     co2SavedKg: {
       type: Number,
     },
+    liveLocation: {
+      lat: { type: Number },
+      lng: { type: Number },
+      updatedAt: { type: Date },
+    },
     status: {
       type: String,
       enum: [
@@ -87,6 +97,12 @@ const ContractSchema = new Schema<IContract>(
     timestamps: true,
   }
 );
+
+// Database indexes for fast participant filtering and status lifecycle queries
+ContractSchema.index({ supplierId: 1, status: 1 });
+ContractSchema.index({ startupId: 1, status: 1 });
+ContractSchema.index({ status: 1, createdAt: -1 });
+ContractSchema.index({ listingId: 1 });
 
 const Contract: Model<IContract> =
   mongoose.models.Contract ||

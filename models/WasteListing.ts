@@ -116,6 +116,9 @@ const WasteListingSchema = new Schema<IWasteListing>(
 
 WasteListingSchema.index({ location: "2dsphere" });
 WasteListingSchema.index({ status: 1 });
+WasteListingSchema.index({ supplierId: 1, status: 1 });
+WasteListingSchema.index({ wasteType: 1, status: 1 });
+WasteListingSchema.index({ status: 1, createdAt: -1 });
 
 const WasteListing: Model<IWasteListing> =
   mongoose.models.WasteListing ||

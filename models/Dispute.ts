@@ -24,7 +24,7 @@ const DisputeSchema = new Schema<IDispute>(
       ref: "User",
       required: true,
     },
-    reason: {
+    reason: {                                                                                                 
       type: String,
       required: true,
     },
@@ -49,6 +49,10 @@ const DisputeSchema = new Schema<IDispute>(
     timestamps: true, // Automatically manages createdAt and updatedAt
   }
 );
+
+DisputeSchema.index({ contractId: 1 });
+DisputeSchema.index({ raisedBy: 1 });
+DisputeSchema.index({ status: 1 });
 
 const Dispute: Model<IDispute> =
   mongoose.models.Dispute || mongoose.model<IDispute>("Dispute", DisputeSchema);

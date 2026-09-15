@@ -67,6 +67,9 @@ const ImpactCertificateSchema = new Schema<
   }
 );
 
+ImpactCertificateSchema.index({ contractId: 1 });
+ImpactCertificateSchema.index({ userId: 1 });
+
 ImpactCertificateSchema.statics.generateCertificateNumber = function (): string {
   const year = new Date().getFullYear();
   // Generate 5 random uppercase alphanumeric characters

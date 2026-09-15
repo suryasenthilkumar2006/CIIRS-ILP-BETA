@@ -13,11 +13,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Sparkles, AlertTriangle, AlertCircle, CheckCircle2 } from "lucide-react";
 
 interface AIGradingResult {
   grade: string;
   contaminationLevel: string;
   confidence: number;
+  lowConfidence?: boolean;
+  notes?: string;
   rawResponse?: string;
 }
 
@@ -182,7 +185,26 @@ export default function ListingForm() {
 
       const updatedListing = await analyzeRes.json();
       if (updatedListing.aiGrading) {
-        setAiGrading(updatedListing.aiGrading);
+        let lowConf = false;
+        if (updatedListing.aiGrading.rawResponse) {
+          try {
+            const rawParsed = JSON.parse(updatedListing.aiGrading.rawResponse);
+            lowConf = Boolean(rawParsed.lowConfidence || rawParsed.confidence < 0.5);
+          } catch {
+            lowConf = (updatedListing.aiGrading.confidence || 1) < 0.5;
+          }
+        } else {
+          lowConf = (updatedListing.aiGrading.confidence || 1) < 0.5;
+        }
+
+        setAiGrading({
+          grade: updatedListing.aiGrading.grade || "B",
+          contaminationLevel: updatedListing.aiGrading.contaminationLevel || "low",
+          confidence: updatedListing.aiGrading.confidence ?? 0.8,
+          lowConfidence: lowConf,
+          notes: updatedListing.aiGrading.notes,
+          rawResponse: updatedListing.aiGrading.rawResponse,
+        });
       }
     } catch (err: any) {
       setIsCreatingListing(false);
@@ -197,10 +219,15 @@ export default function ListingForm() {
     setError("");
 
     try {
-      if (!createdListingId) {
-        await ensureListingCreated(formData.photoUrls);
+      let listingId = createdListingId;
+      if (!listingId) {
+        listingId = await ensureListingCreated(formData.photoUrls);
       }
-      router.push("/listings");
+      if (listingId) {
+        router.push(`/listings/${listingId}`);
+      } else {
+        router.push("/listings");
+      }
     } catch (err: any) {
       setError(err.message || "Failed to finalize listing.");
       setIsSubmittingFinal(false);
@@ -220,26 +247,29 @@ export default function ListingForm() {
             <div key={s.num} className="flex flex-1 items-center">
               <div className="flex flex-col items-center gap-1">
                 <div
-                  className={`flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold transition-colors ${step === s.num
+                  className={`flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold transition-colors ${
+                    step === s.num
                       ? "bg-blue-600 text-white ring-4 ring-blue-600/20"
                       : step > s.num
-                        ? "bg-emerald-600 text-white"
-                        : "bg-zinc-800 text-zinc-400 border border-zinc-700"
-                    }`}
+                      ? "bg-emerald-600 text-white"
+                      : "bg-zinc-800 text-zinc-400 border border-zinc-700"
+                  }`}
                 >
                   {step > s.num ? "✓" : s.num}
                 </div>
                 <span
-                  className={`text-xs font-medium ${step === s.num ? "text-blue-400" : "text-zinc-400"
-                    }`}
+                  className={`text-xs font-medium ${
+                    step === s.num ? "text-blue-400" : "text-zinc-400"
+                  }`}
                 >
                   {s.label}
                 </span>
               </div>
               {s.num < 3 && (
                 <div
-                  className={`mx-2 h-0.5 flex-1 transition-colors ${step > s.num ? "bg-emerald-600" : "bg-zinc-800"
-                    }`}
+                  className={`mx-2 h-0.5 flex-1 transition-colors ${
+                    step > s.num ? "bg-emerald-600" : "bg-zinc-800"
+                  }`}
                 />
               )}
             </div>
@@ -256,9 +286,12 @@ export default function ListingForm() {
             {step === 3 && "Step 3: Review & Finalize Listing"}
           </CardTitle>
           <CardDescription className="text-zinc-400">
-            {step === 1 && "Provide accurate information regarding the material type, quantity, and location."}
-            {step === 2 && "Upload clear photographs of your waste batch to generate automated quality grading."}
-            {step === 3 && "Verify all listing data and AI inspection grades before publishing."}
+            {step === 1 &&
+              "Provide accurate information regarding the material type, quantity, and location."}
+            {step === 2 &&
+              "Upload clear photographs of your waste batch to generate automated quality grading."}
+            {step === 3 &&
+              "Verify all listing data and AI inspection grades before publishing."}
           </CardDescription>
         </CardHeader>
 
@@ -425,7 +458,7 @@ export default function ListingForm() {
             </div>
           )}
 
-          {/* STEP 2 — Photo Upload & AI Grading */}
+          {/* STEP 2 — Photo Upload & Editable AI Grading Suggestion */}
           {step === 2 && (
             <div className="space-y-6">
               <div>
@@ -444,7 +477,7 @@ export default function ListingForm() {
                       Analyzing your photo...
                     </p>
                     <p className="text-xs text-blue-400/80">
-                      Gemini Vision AI is inspecting material purity, contamination levels, and assigned quality grade.
+                      Gemini Vision AI is inspecting material purity, contamination levels, and assigning quality grades.
                     </p>
                   </div>
                 </div>
@@ -459,38 +492,96 @@ export default function ListingForm() {
                 </div>
               )}
 
-              {/* AI Grading Results */}
+              {/* AI Grading Results (Editable suggestion: AI suggests, human confirms) */}
               {aiGrading && !isAnalyzing && (
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                      AI Quality Inspection
-                    </span>
-                    <span
-                      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold ${aiGrading.grade === "A"
-                          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                          : aiGrading.grade === "B"
-                            ? "bg-amber-500/20 text-amber-400 border border-amber-500/40"
-                            : "bg-red-500/20 text-red-400 border border-red-500/40"
-                        }`}
-                    >
-                      Grade {aiGrading.grade}
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 pt-1">
-                    <div className="rounded bg-zinc-950 p-2.5 border border-zinc-800">
-                      <span className="block text-xs text-zinc-500">Contamination</span>
-                      <span className="text-sm font-medium capitalize text-zinc-200">
-                        {aiGrading.contaminationLevel}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-4 shadow-sm">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        <Sparkles className="h-3.5 w-3.5" />
+                      </div>
+                      <span className="text-xs font-semibold uppercase tracking-wider text-zinc-200">
+                        Quality Inspection
+                      </span>
+                      <span className="text-[11px] text-zinc-400 bg-zinc-800 px-2 py-0.5 rounded-full border border-zinc-700">
+                        AI suggested — you can adjust
                       </span>
                     </div>
 
-                    <div className="rounded bg-zinc-950 p-2.5 border border-zinc-800">
-                      <span className="block text-xs text-zinc-500">Confidence</span>
-                      <span className="text-sm font-medium text-zinc-200">
-                        {Math.round(aiGrading.confidence * 100)}%
+                    <div className="flex items-center gap-2 text-xs text-zinc-400">
+                      <span>
+                        AI Confidence:{" "}
+                        <strong className="text-zinc-200">
+                          {Math.round(aiGrading.confidence * 100)}%
+                        </strong>
                       </span>
+                    </div>
+                  </div>
+
+                  {/* Low Confidence Warning Notice */}
+                  {aiGrading.lowConfidence && (
+                    <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">
+                      <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                      <div>
+                        <p className="font-semibold text-amber-200">
+                          Please double-check this photo&apos;s grading
+                        </p>
+                        <p className="text-amber-300/80 text-[11px] mt-0.5">
+                          Low AI confidence ({Math.round(aiGrading.confidence * 100)}%). Review the assigned grade and contamination below to ensure accurate matching.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Editable Grade and Contamination Controls */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+                    {/* Quality Grade Select */}
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-medium text-zinc-300">
+                        Assigned Quality Grade *
+                      </label>
+                      <select
+                        value={aiGrading.grade}
+                        onChange={(e) =>
+                          setAiGrading((prev) =>
+                            prev ? { ...prev, grade: e.target.value } : null
+                          )
+                        }
+                        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 font-semibold focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                      >
+                        <option value="A">Grade A (Clean, Uniform, Minimal Foreign Matter)</option>
+                        <option value="B">Grade B (Usable with Minor / Mixed Contamination)</option>
+                        <option value="C">Grade C (Degraded / Significant Contamination)</option>
+                      </select>
+                      <p className="text-[10px] text-zinc-500">
+                        Grade A yields higher Green Credits and premium valorization.
+                      </p>
+                    </div>
+
+                    {/* Contamination Level Select */}
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-medium text-zinc-300">
+                        Contamination Level *
+                      </label>
+                      <select
+                        value={aiGrading.contaminationLevel}
+                        onChange={(e) =>
+                          setAiGrading((prev) =>
+                            prev
+                              ? { ...prev, contaminationLevel: e.target.value }
+                              : null
+                          )
+                        }
+                        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 font-semibold capitalize focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                      >
+                        <option value="none">None (0% Foreign Materials)</option>
+                        <option value="low">Low (&lt;5% Non-target)</option>
+                        <option value="medium">Medium (5-20% Mixed Items)</option>
+                        <option value="high">High (&gt;20% Foreign Items)</option>
+                      </select>
+                      <p className="text-[10px] text-zinc-500">
+                        Adjust if the photo shows lighting glare or partial occlusion.
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -510,7 +601,11 @@ export default function ListingForm() {
                 <Button
                   type="button"
                   onClick={() => setStep(3)}
-                  disabled={formData.photoUrls.length === 0 || isAnalyzing || isCreatingListing}
+                  disabled={
+                    formData.photoUrls.length === 0 ||
+                    isAnalyzing ||
+                    isCreatingListing
+                  }
                   className="bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isAnalyzing ? (
@@ -534,7 +629,8 @@ export default function ListingForm() {
                 <div className="flex justify-between border-b border-zinc-800 pb-2">
                   <span className="text-zinc-400">Waste Type</span>
                   <span className="font-medium text-zinc-100">
-                    {formData.wasteType} {formData.subType ? `(${formData.subType})` : ""}
+                    {formData.wasteType}{" "}
+                    {formData.subType ? `(${formData.subType})` : ""}
                   </span>
                 </div>
 
@@ -576,24 +672,32 @@ export default function ListingForm() {
                   </span>
                 </div>
 
-                {/* AI Inspection summary */}
+                {/* Confirmed Quality Grade summary */}
                 {aiGrading && (
                   <div className="pt-2">
-                    <span className="block text-xs text-zinc-400 mb-1">
-                      Assigned Quality Grade
-                    </span>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="block text-xs text-zinc-400">
+                        Confirmed Quality Grade
+                      </span>
+                      <span className="text-[10px] text-zinc-500">
+                        {aiGrading.lowConfidence
+                          ? "(Manually Adjusted / Verified)"
+                          : "(AI Inspected & Confirmed)"}
+                      </span>
+                    </div>
                     <div className="flex items-center gap-2">
                       <span
-                        className={`rounded px-2 py-0.5 text-xs font-bold ${aiGrading.grade === "A"
+                        className={`rounded px-2 py-0.5 text-xs font-bold ${
+                          aiGrading.grade === "A"
                             ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
                             : aiGrading.grade === "B"
-                              ? "bg-amber-500/20 text-amber-400 border border-amber-500/40"
-                              : "bg-red-500/20 text-red-400 border border-red-500/40"
-                          }`}
+                            ? "bg-amber-500/20 text-amber-400 border border-amber-500/40"
+                            : "bg-red-500/20 text-red-400 border border-red-500/40"
+                        }`}
                       >
                         Grade {aiGrading.grade}
                       </span>
-                      <span className="text-xs text-zinc-400">
+                      <span className="text-xs text-zinc-400 capitalize">
                         ({aiGrading.contaminationLevel} contamination,{" "}
                         {Math.round(aiGrading.confidence * 100)}% confidence)
                       </span>
@@ -618,7 +722,9 @@ export default function ListingForm() {
                   disabled={isSubmittingFinal}
                   className="bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
                 >
-                  {isSubmittingFinal ? "Finalizing..." : "Confirm & Publish Listing"}
+                  {isSubmittingFinal
+                    ? "Finalizing..."
+                    : "Confirm & Publish Listing"}
                 </Button>
               </div>
             </div>

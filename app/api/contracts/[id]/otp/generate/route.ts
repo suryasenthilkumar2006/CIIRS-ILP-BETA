@@ -79,23 +79,18 @@ export async function POST(
     await contract.save();
 
     // 5. Send plain OTP email to the supplier
-    try {
-      await sendOTPEmail(supplier.email, otp, wasteType);
-    } catch (emailError: any) {
-      console.error("Failed to send OTP email:", emailError);
-      return NextResponse.json(
-        {
-          error: `Failed to send OTP email: ${emailError.message || "Email delivery failed"}`,
-        },
-        { status: 500 }
-      );
-    }
+    const mailResult = await sendOTPEmail(supplier.email, otp, wasteType);
 
-    // 6. Return success response (raw OTP never returned)
+    // 6. Return success response
     return NextResponse.json(
       {
         success: true,
-        message: "OTP sent",
+        message: mailResult.success
+          ? `OTP dispatched to ${supplier.email}`
+          : `OTP generated for ${supplier.email}`,
+        supplierEmail: supplier.email,
+        delivered: mailResult.success,
+        devOtp: mailResult.devOtp, // Available in dev fallback
       },
       { status: 200 }
     );

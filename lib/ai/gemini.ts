@@ -2,7 +2,8 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 let sharp: any = null;
 try {
-  sharp = require("sharp");
+  // Use dynamic evaluation so webpack does not attempt static module resolution if sharp is not installed
+  sharp = eval("require")("sharp");
 } catch {
   sharp = null;
 }
@@ -13,19 +14,20 @@ export interface WasteAnalysisResult {
   estimatedQuantityKg: number | null;
   confidence: number;
   notes: string;
+  lowConfidence: boolean;
 }
 
 /**
  * Optimizes image URLs (specifically Cloudinary CDN URLs) to automatically
- * resize to max 1024px dimension, optimize quality, and format as JPEG,
- * minimizing network transfer overhead before processing.
+ * resize to max 1568px dimension, optimize quality, and format as JPEG,
+ * minimizing network transfer overhead while preserving visual detail for inspection.
  */
 function getOptimizedImageUrl(imageUrl: string): string {
   if (imageUrl.includes("res.cloudinary.com") && imageUrl.includes("/upload/")) {
     if (!imageUrl.includes("/upload/w_") && !imageUrl.includes("/upload/c_")) {
       return imageUrl.replace(
         "/upload/",
-        "/upload/w_1024,c_limit,q_auto:good,f_jpg/"
+        "/upload/w_1568,c_limit,q_auto:good,f_jpg/"
       );
     }
   }
@@ -33,7 +35,7 @@ function getOptimizedImageUrl(imageUrl: string): string {
 }
 
 /**
- * Fetches an image from a URL, resizes/compresses it to a max dimension of 1024px
+ * Fetches an image from a URL, resizes/compresses it to a max dimension of 1568px
  * (using sharp if available, or Cloudinary URL transformations / quality capping),
  * and converts it to the inlineData base64 format expected by GoogleGenerativeAI.
  */
@@ -58,12 +60,12 @@ async function urlToGenerativePart(imageUrl: string, fetchTimeoutMs: number = 80
       (response.headers.get("content-type") || "image/jpeg").split(";")[0].trim() ||
       "image/jpeg";
 
-    // If sharp is available, resize/compress image buffer to max 1024px dimension at 80% JPEG quality
+    // If sharp is available, resize/compress image buffer to max 1568px dimension at 85% JPEG quality
     if (sharp) {
       try {
         buffer = await sharp(buffer)
-          .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
-          .jpeg({ quality: 80 })
+          .resize(1568, 1568, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 85 })
           .toBuffer();
         mimeType = "image/jpeg";
       } catch (sharpError) {
@@ -125,9 +127,10 @@ export async function analyzeWastePhoto(
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  // Specifically use gemini-2.0-flash for fast, cost-effective vision classification
+  // Pick up model from process.env.GEMINI_MODEL with fallback to gemini-2.0-flash
+  const modelName = process.env.GEMINI_MODEL?.trim() || "gemini-2.0-flash";
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.0-flash",
+    model: modelName,
     generationConfig: {
       responseMimeType: "application/json",
       temperature: 0.2,
@@ -137,23 +140,26 @@ export async function analyzeWastePhoto(
   const prompt = `You are an expert waste quality inspector and materials recovery specialist for a circular economy B2B waste marketplace.
 Analyze the provided waste photograph for waste type: "${wasteType}".
 
-Evaluate the material purity, contamination, condition, and estimated visible volume/mass.
+Evaluate the material purity, contamination, condition, segregation, and estimated visible volume/mass.
 
-You must return STRICT JSON ONLY (no commentary, no explanations, no preamble). The response must match this exact JSON schema:
+Grading Rubric:
+- Grade A: Clean, minimal foreign material, uniform and well-segregated batch. (contaminationLevel: "none" or "low")
+- Grade B: Some visible contamination or mixed material, but still usable for circular recycling/valorization. (contaminationLevel: "low" or "medium")
+- Grade C: Significant contamination, non-target materials, or material degradation. (contaminationLevel: "medium" or "high")
+
+In your reasoning/notes, you must reference this grading rubric explicitly and explain how the visual observations justify the assigned grade and contamination level.
+
+You must return STRICT JSON ONLY (no commentary, no explanations, no markdown formatting outside JSON). The response must match this exact JSON schema:
 {
   "grade": "A" | "B" | "C",
   "contaminationLevel": "none" | "low" | "medium" | "high",
   "estimatedQuantityKg": <number or null if not determinable>,
   "confidence": <number between 0.0 and 1.0>,
-  "notes": "<concise inspection notes explaining observed contamination, segregation quality, condition, and justification for the grade>"
-}
+  "notes": "<concise inspection notes explicitly referencing the grading rubric, observed contaminants, material uniformity, and grade justification>",
+  "lowConfidence": <boolean, true if confidence is below 0.5, false otherwise>
+}`;
 
-Grading Guidelines:
-- Grade A: Clean, segregated, homogenous material with little to no contamination (contaminationLevel: "none" or "low").
-- Grade B: Moderate quality, partially segregated, minor presence of non-target items or mild moisture/dirt (contaminationLevel: "low" or "medium").
-- Grade C: Highly contaminated, mixed, degraded, or poorly sorted material (contaminationLevel: "medium" or "high").`;
-
-  // 1. Fetch image with size optimization (max 1024px) & base64 conversion
+  // 1. Fetch image with size optimization (max 1568px) & base64 conversion
   const imagePart = await urlToGenerativePart(imageUrl);
 
   // 2. Set up hard 15-second timeout for the Gemini API call using Promise.race()
@@ -215,12 +221,18 @@ Grading Guidelines:
         ? parsed.notes.trim()
         : "Inspection completed.";
 
+    const lowConfidence =
+      typeof parsed.lowConfidence === "boolean"
+        ? parsed.lowConfidence || confidence < 0.5
+        : confidence < 0.5;
+
     return {
       grade,
       contaminationLevel,
       estimatedQuantityKg,
       confidence,
       notes,
+      lowConfidence,
     };
   } catch (error: any) {
     if (timeoutTimer) clearTimeout(timeoutTimer);

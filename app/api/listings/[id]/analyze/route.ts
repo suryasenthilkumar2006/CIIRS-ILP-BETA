@@ -35,13 +35,18 @@ export async function POST(
         listing.wasteType
       );
     } catch (aiError: any) {
-      console.error("Gemini analysis failed:", aiError);
-      return NextResponse.json(
-        {
-          error: `AI analysis failed: ${aiError.message || "Unknown Gemini error"}`,
-        },
-        { status: 500 }
+      console.warn(
+        "Gemini AI photo analysis failed or timed out, applying manual verification fallback:",
+        aiError.message
       );
+      analysisResult = {
+        grade: "B" as const,
+        contaminationLevel: "low" as const,
+        estimatedQuantityKg: listing.quantityKg || null,
+        confidence: 0.45,
+        lowConfidence: true,
+        notes: `Automated inspection deferred (${aiError.message || "AI service latency"}). Please confirm or adjust the quality grade manually before publishing.`,
+      };
     }
 
     listing.aiGrading = {

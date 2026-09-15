@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Eye, EyeOff } from "lucide-react";
 import {
     Card,
     CardContent,
@@ -22,20 +23,41 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 
+const WASTE_TYPES = [
+    { id: "organic-flowers", label: "Organic / Temple Flowers" },
+    { id: "food-waste", label: "Food Waste / Kitchen Scraps" },
+    { id: "plastic", label: "Plastic / Polymers" },
+    { id: "textile", label: "Textile / Fabric Scraps" },
+    { id: "e-waste", label: "E-Waste / Electronics" },
+    { id: "paper", label: "Paper & Cardboard" },
+    { id: "metal", label: "Metal / Scrap" },
+    { id: "other", label: "Other Materials" },
+];
+
 export default function RegisterPage() {
     const router = useRouter();
 
     const [name, setName] = useState("");
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
+    const [showPassword, setShowPassword] = useState(false);
     const [role, setRole] = useState<"supplier" | "startup">("supplier");
     const [organizationName, setOrganizationName] = useState("");
     const [organizationType, setOrganizationType] = useState<string>("temple");
     const [phone, setPhone] = useState("");
     const [address, setAddress] = useState("");
+    const [selectedWasteTypes, setSelectedWasteTypes] = useState<string[]>([]);
 
     const [error, setError] = useState("");
     const [isLoading, setIsLoading] = useState(false);
+
+    const toggleWasteType = (typeId: string) => {
+        setSelectedWasteTypes((prev) =>
+            prev.includes(typeId)
+                ? prev.filter((id) => id !== typeId)
+                : [...prev, typeId]
+        );
+    };
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -64,20 +86,29 @@ export default function RegisterPage() {
         setIsLoading(true);
 
         try {
+            // Build payload with role-specific waste types field
+            const payload: Record<string, any> = {
+                name: name.trim(),
+                email: email.toLowerCase().trim(),
+                password,
+                role,
+                organizationName: organizationName.trim(),
+                organizationType,
+                phone: phone.trim(),
+                address: address.trim(),
+            };
+
+            if (role === "supplier") {
+                payload.wasteTypesOffered = selectedWasteTypes;
+            } else {
+                payload.wasteTypesNeeded = selectedWasteTypes;
+            }
+
             // 1. Send registration payload to API
             const res = await fetch("/api/auth/register", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    name: name.trim(),
-                    email: email.toLowerCase().trim(),
-                    password,
-                    role,
-                    organizationName: organizationName.trim(),
-                    organizationType,
-                    phone: phone.trim(),
-                    address: address.trim(),
-                }),
+                body: JSON.stringify(payload),
             });
 
             const data = await res.json().catch(() => ({}));
@@ -231,6 +262,46 @@ export default function RegisterPage() {
                             </div>
                         </div>
 
+                        {/* Role-Specific Waste Types Multi-Select */}
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium leading-none text-zinc-300">
+                                {role === "supplier" ? "What waste do you generate?" : "What waste do you need?"}
+                            </label>
+                            <p className="text-xs text-zinc-500">Select all material streams that apply</p>
+                            <div className="grid grid-cols-2 gap-2 pt-1">
+                                {WASTE_TYPES.map((type) => {
+                                    const isSelected = selectedWasteTypes.includes(type.id);
+                                    return (
+                                        <button
+                                            key={type.id}
+                                            type="button"
+                                            onClick={() => toggleWasteType(type.id)}
+                                            className={`flex items-center gap-2 rounded-lg border p-2 text-left text-xs font-medium transition-all ${
+                                                isSelected
+                                                    ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400 font-semibold"
+                                                    : "border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                                            }`}
+                                        >
+                                            <div
+                                                className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                                                    isSelected
+                                                        ? "border-emerald-500 bg-emerald-500 text-zinc-950"
+                                                        : "border-zinc-700 bg-zinc-950"
+                                                }`}
+                                            >
+                                                {isSelected && (
+                                                    <svg className="h-3 w-3 fill-current" viewBox="0 0 20 20">
+                                                        <path d="M0 11l2-2 5 5L18 3l2 2L7 18z" />
+                                                    </svg>
+                                                )}
+                                            </div>
+                                            <span className="truncate">{type.label}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
                         {/* Organization Name & Phone */}
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                             <div className="space-y-2">
@@ -297,16 +368,30 @@ export default function RegisterPage() {
                             >
                                 Password (min. 6 characters) *
                             </label>
-                            <Input
-                                id="password"
-                                type="password"
-                                placeholder="••••••••"
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                required
-                                minLength={6}
-                                className="bg-zinc-900/50 border-zinc-800 text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-zinc-700"
-                            />
+                            <div className="relative">
+                                <Input
+                                    id="password"
+                                    type={showPassword ? "text" : "password"}
+                                    placeholder="••••••••"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    required
+                                    minLength={6}
+                                    className="bg-zinc-900/50 border-zinc-800 text-zinc-100 placeholder:text-zinc-500 focus-visible:ring-zinc-700 pr-10"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowPassword(!showPassword)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200 focus:outline-none transition-colors"
+                                    aria-label={showPassword ? "Hide password" : "Show password"}
+                                >
+                                    {showPassword ? (
+                                        <EyeOff className="h-4 w-4" />
+                                    ) : (
+                                        <Eye className="h-4 w-4" />
+                                    )}
+                                </button>
+                            </div>
                         </div>
 
                         {error && (

@@ -98,20 +98,27 @@ export async function GET(req: NextRequest) {
     const wasteType = searchParams.get("wasteType");
     const status = searchParams.get("status");
     const supplierId = searchParams.get("supplierId");
+    const limit = Math.min(Math.max(1, parseInt(searchParams.get("limit") || "50", 10)), 200);
+    const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
+    const skip = (page - 1) * limit;
 
-    const filter: Record<string, string> = {};
+    const filter: Record<string, any> = {};
 
-    if (wasteType) {
-      filter.wasteType = wasteType;
+    if (wasteType && wasteType !== "all") {
+      filter.wasteType = new RegExp(`^${wasteType.trim()}$`, "i");
     }
-    if (status) {
+    if (status && status !== "all") {
       filter.status = status;
     }
     if (supplierId) {
       filter.supplierId = supplierId;
     }
 
-    const listings = await WasteListing.find(filter).sort({ createdAt: -1 });
+    const listings = await WasteListing.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
 
     return NextResponse.json(listings);
   } catch (error: any) {

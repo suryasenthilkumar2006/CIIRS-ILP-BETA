@@ -18,6 +18,8 @@ export interface IUser extends Document {
     type: "Point";
     coordinates: [number, number]; // [longitude, latitude]
   };
+  wasteTypesOffered?: string[];
+  wasteTypesNeeded?: string[];
   reliabilityScoreId?: mongoose.Types.ObjectId;
   greenCreditBalance: number;
   createdAt: Date;
@@ -72,6 +74,14 @@ const UserSchema = new Schema<IUser>(
         type: [Number],
         required: true,
       },
+    },
+    wasteTypesOffered: {
+      type: [String],
+      default: [],
+    },
+    wasteTypesNeeded: {
+      type: [String],
+      default: [],
     },
     reliabilityScoreId: {
       type: Schema.Types.ObjectId,
